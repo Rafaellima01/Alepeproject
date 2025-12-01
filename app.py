@@ -7,8 +7,7 @@ import textwrap
 from collections import Counter
 import io
 
-# ===================== CONFIGURAÇÕES =====================
-st.set_page_config(page_title="Monitor Legislativo ALEPE", layout="wide", page_icon="https://www.alepe.pe.gov.br/wp-content/themes/alepe/images/favicon.ico")
+st.set_page_config(page_title="Monitor ALEPE • Comércio, Serviços e Turismo", layout="wide")
 
 # ===================== PALAVRAS-CHAVE (700+ termos do comércio, serviços e turismo) =====================
 palavras_chave = [
@@ -150,115 +149,103 @@ palavras_chave = [
     "base de dados turística", "sistema de informações turísticas"
 ]
 
-# ===================== CARREGAR DADOS DA ALEPE =====================
-@st.cache_data(ttl=3600, show_spinner="Consultando ALEPE...")
+# ===================== FUNÇÃO ULTRA-RESILIENTE =====================
+@st.cache_data(ttl=1800, show_spinner=False)  # 30 minutos de cache
 def carregar_dados():
     ano = datetime.now().year
     url = f"https://dadosabertos.alepe.pe.gov.br/api/v1/proposicoes/projetos?ano={ano}"
-    
+
     try:
-        response = requests.get(url, timeout=50)
-        response.raise_for_status()
-    except:
-        st.error("Erro ao conectar com a ALEPE. Tente novamente mais tarde.")
+        headers = {'User-Agent': 'Monitor-Fecomercio-PE/1.0'}
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        st.error(f"Não foi possível conectar à ALEPE agora.\nErro: {e}\n\nTente novamente em alguns minutos.")
         st.stop()
 
-    tree = ET.fromstring(response.text)
-    proposicoes = []
+    try:
+        tree = ET.fromstring(r.content)
+    except ET.ParseError:
+        st.error("A ALEPE retornou um XML quebrado (acontece muito no fim do ano).\nVamos tentar de novo em alguns minutos.")
+        st.stop()
 
-    for projeto in tree.findall('.//projeto'):
-        p = projeto.attrib
-        autores = [a.attrib.get('nome', '') for a in projeto.findall('.//autor')]
-        p['autor'] = ', '.join(filter(None, autores)) or "Não informado"
-        p['ementa'] = projeto.findtext('ementa') or ""
-        proposicoes.append(p)
+    projetos = []
+    for proj in tree.findall(".//projeto"):
+        p = proj.attrib
+        autores = [a.attrib.get("nome", "") for a in proj.findall(".//autor")]
+        p["autor"] = ", ".join(filter(None, autores)) or "Não informado"
+        p["ementa"] = proj.findtext("ementa") or ""
+        p["dataPublicacao"] = p.get("dataPublicacao", "01/01/1900")
+        projetos.append(p)
 
-    # Filtrar apenas as relevantes para comércio, serviços e turismo
+    # Filtra só as relevantes
     relevantes = []
-    for p in proposicoes:
-        ementa = p.get('ementa', '').lower()
-        if any(palavra in ementa for palavra in palavras_chave):
+    for p in projetos:
+        if any(palavra in p["ementa"].lower() for palavra in palavras_chave):
             relevantes.append(p)
 
-    # Ordenar por data mais recente
-    def data_sort(x):
-        try:
-            return datetime.strptime(x.get('dataPublicacao', '01/01/1900'), '%d/%m/%Y')
-        except:
-            return datetime.min
-    relevantes.sort(key=data_sort, reverse=True)
-    
+    # Ordena por data
+    relevantes.sort(key=lambda x: datetime.strptime(x["dataPublicacao"], "%d/%m/%Y"), reverse=True)
     return relevantes[:900]
 
-# ===================== CARREGAR =====================
-with st.spinner("Carregando proposições relevantes..."):
+# ===================== CARREGA =====================
+with st.spinner("Consultando ALEPE..."):
     dados = carregar_dados()
 
 if not dados:
-    st.warning(f"Nenhuma proposição relevante para o setor em {datetime.now().year}.")
+    st.warning(f"Nenhuma proposição relevante encontrada em {datetime.now().year} até o momento.")
+    st.info("Isso é normal no começo do ano legislativo. Volte em alguns dias.")
     st.stop()
 
 df = pd.DataFrame(dados)
-df['ementa'] = df['ementa'].apply(lambda x: '<br>'.join(textwrap.wrap(x, width=100)) if x else '')
+df["ementa"] = df["ementa"].apply(lambda x: "<br>".join(textwrap.wrap(x, 110)))
 
 # ===================== INTERFACE =====================
 st.title("Monitor Legislativo ALEPE")
-st.markdown(f"### Encontradas **{len(dados)}** proposições em {datetime.now().year}")
-st.markdown("**Comércio • Serviços • Turismo** em Pernambuco")
+st.markdown(f"**{len(dados)}** proposições relevantes encontradas em {datetime.now().year}")
+st.markdown("**Comércio • Serviços • Turismo** • Pernambuco")
 
-# Botões principais
-col1, col2, col3 = st.columns(3)
-with col1:
-    if st.button("Ver Todas as Proposições", use_container_width=True):
-        st.session_state.view = "lista"
-with col2:
-    if st.button("Ranking por Autor", use_container_width=True):
-        st.session_state.view = "autores"
-with col3:
-    if st.button("Exportar Excel", use_container_width=True):
-        st.session_state.view = "excel"
+c1, c2, c3 = st.columns(3)
+with c1: st.button("Ver lista completa", use_container_width=True, on_click=lambda: st.session_state.update(view="lista"))
+with c2: st.button("Ranking por deputado", use_container_width=True, on_click=lambda: st.session_state.update(view="autores"))
+with c3: st.button("Exportar Excel", use_container_width=True, on_click=lambda: st.session_state.update(view="excel"))
 
-# ===================== RANKING POR AUTOR =====================
+# ===================== RANKING =====================
 if st.session_state.get("view") == "autores":
-    st.subheader("Proposições por Autor (Top 20)")
-    todos_autores = []
-    for autores in df['autor']:
-        todos_autores.extend([a.strip() for a in autores.split(',') if a.strip()])
-    ranking = Counter(todos_autores).most_common(20)
-    df_ranking = pd.DataFrame(ranking, columns=["Deputado", "Quantidade"])
-    st.bar_chart(df_ranking.set_index("Deputado"))
+    st.subheader("Top 20 deputados com mais proposições relevantes")
+    autores = []
+    for a in df["autor"]:
+        autores.extend([x.strip() for x in a.split(",") if x.strip()])
+    top20 = Counter(autores).most_common(20)
+    st.bar_chart(dict(top20))
 
-# ===================== EXPORTAR EXCEL =====================
+# ===================== EXCEL =====================
 if st.session_state.get("view") == "excel":
-    output = io.BytesIO()
-    df.to_excel(output, index=False, engine='openpyxl')
-    output.seek(0)
+    buffer = io.BytesIO()
+    df.to_excel(buffer, index=False, engine="openpyxl")
+    buffer.seek(0)
     st.download_button(
-        label="Baixar todas as proposições em Excel",
-        data=output,
-        file_name=f"ALEPE_Comercio_Servicos_Turismo_{datetime.now().year}.xlsx",
+        "Baixar Excel completo",
+        data=buffer,
+        file_name=f"ALEPE_Relevantes_{datetime.now().year}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
-    st.success("Arquivo pronto!")
+    st.success("Pronto para baixar!")
 
-# ===================== LISTA COMPLETA =====================
+# ===================== LISTA =====================
 if "view" not in st.session_state or st.session_state.view == "lista":
-    st.subheader("Proposições Relevantes Encontradas")
-
-    busca = st.text_input("Buscar por palavra na ementa ou autor", "")
-    df_view = df.copy()
+    busca = st.text_input("Buscar na ementa ou autor")
+    df_show = df.copy()
     if busca:
-        mask = df_view['ementa'].str.contains(busca, case=False, na=False) | \
-               df_view['autor'].str.contains(busca, case=False, na=False)
-        df_view = df_view[mask]
+        df_show = df_show[df_show["ementa"].str.contains(busca, case=False) | df_show["autor"].str.contains(busca, case=False)]
 
-    for _, row in df_view.iterrows():
+    for _, row in df_show.iterrows():
         with st.container():
-            c1, c2, c3 = st.columns([1, 6, 2])
-            c1.markdown(f"**PL {row['numero']}/{row['ano']}**")
-            c2.markdown(f"<small>{row['ementa']}</small>", unsafe_allow_html=True)
-            c3.markdown(f"<small><i>{row['autor']}</i></small>", unsafe_allow_html=True)
-            st.markdown("---")
+            col1, col2, col3 = st.columns([1, 6, 2])
+            col1.markdown(f"**PL {row['numero']}/{row['ano']}**")
+            col2.markdown(f"<small>{row['ementa']}</small>", unsafe_allow_html=True)
+            col3.markdown(f"<i>{row['autor']}</i>")
+            st.divider()
 
-st.caption("Sistema Fecomércio-PE • Monitoramento Legislativo • Atualizado automaticamente")
+st.caption("Sistema Fecomércio-PE • Atualiza automaticamente • Sem uso de IA (versão monitoramento)")
