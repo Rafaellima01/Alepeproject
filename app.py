@@ -157,7 +157,7 @@ def carregar_dados():
 
     try:
         headers = {'User-Agent': 'Monitor-Fecomercio-PE/1.0'}
-        r = requests.get(url, headers=headers, timeout=30)
+        r = requests.get(url, headers=headers, timeout=120)
         r.raise_for_status()
     except Exception as e:
         st.error(f"Não foi possível conectar à ALEPE agora.\nErro: {e}\n\nTente novamente em alguns minutos.")
